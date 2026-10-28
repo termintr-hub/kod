@@ -823,14 +823,32 @@ start: function(color = '#00ffff') { this.color = color; const overlay = documen
 stop: function() { this.active = false; if (this.ctx) this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); }
 };
 const AudioManager = {
-ctx: null, rainNode: null,
+ctx: null, rainNode: null, _awakeningSongMuted: false, _savedRainVol: 0,
+// ==== RIN UYANIŞ ŞARKISI SIRASINDA TÜM DİĞER SESLERİ KES (yalnızca mp3 çalsın) ====
+setAwakeningSongMute: function(on) {
+if (on === this._awakeningSongMuted) return;
+this._awakeningSongMuted = on;
+if (on) {
+if (this.rainNode && this.ctx) {
+this._savedRainVol = this.rainNode.gain.gain.value;
+this.rainNode.gain.gain.cancelScheduledValues(this.ctx.currentTime);
+this.rainNode.gain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+}
+} else if (this.rainNode && this.ctx) {
+this.rainNode.gain.gain.cancelScheduledValues(this.ctx.currentTime);
+this.rainNode.gain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+this.rainNode.gain.gain.linearRampToValueAtTime(Math.max(0.0002, this._savedRainVol || 0.0001), this.ctx.currentTime + 0.5);
+}
+},
 init: function() {
+try {
 if (!this.ctx) { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
-if (this.ctx.state === 'suspended') this.ctx.resume();
-RinAwakeningAudio.init();
+if (this.ctx.state === 'suspended') { const rp = this.ctx.resume(); if (rp && rp.catch) rp.catch(()=>{}); }
+} catch (err) {}
+try { RinAwakeningAudio.init(); } catch (err) {}
 },
 playShoot: function(power) {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 const t = this.ctx.currentTime;
 const osc = this.ctx.createOscillator(); const gain = this.ctx.createGain();
 osc.type = 'sine'; osc.frequency.setValueAtTime(150 + power * 100, t); osc.frequency.exponentialRampToValueAtTime(30, t + 0.15);
@@ -838,9 +856,9 @@ gain.gain.setValueAtTime(0.8, t); gain.gain.exponentialRampToValueAtTime(0.01, t
 osc.connect(gain); gain.connect(this.ctx.destination); osc.start(t); osc.stop(t + 0.2);
 this.playNoise(0.2, 0.4, 800);
 },
-playGoal: function() { if (!this.ctx) return; this.playNoise(0.6, 0.5, 2000, 200); },
+playGoal: function() { if (!this.ctx || this._awakeningSongMuted) return; this.playNoise(0.6, 0.5, 2000, 200); },
 playAwakening: function() {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 const t = this.ctx.currentTime;
 const sub = this.ctx.createOscillator(); const subGain = this.ctx.createGain();
 sub.type = 'sine'; sub.frequency.setValueAtTime(110, t); sub.frequency.exponentialRampToValueAtTime(32, t + 0.45);
@@ -858,7 +876,7 @@ osc.connect(g); g.connect(this.ctx.destination); osc.start(t + idx * 0.04); osc.
 this.playNoise(0.35, 0.18, 900, 180);
 },
 playImpact: function(freq = 120, dur = 0.25) {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 const t = this.ctx.currentTime;
 const osc = this.ctx.createOscillator(); const g = this.ctx.createGain();
 osc.type = 'triangle'; osc.frequency.setValueAtTime(freq, t); osc.frequency.exponentialRampToValueAtTime(22, t + dur);
@@ -867,12 +885,12 @@ osc.connect(g); g.connect(this.ctx.destination); osc.start(t); osc.stop(t + dur)
 this.playNoise(dur * 0.8, 0.35, 1400, 120);
 },
 playHeartbeat: function() {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 this.playImpact(58, 0.16);
 setTimeout(() => this.playImpact(48, 0.22), 190);
 },
 playThunder: function() {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 const t = this.ctx.currentTime;
 const osc = this.ctx.createOscillator(); const g = this.ctx.createGain();
 osc.type = 'sine'; osc.frequency.setValueAtTime(58, t); osc.frequency.exponentialRampToValueAtTime(20, t + 1.4);
@@ -909,7 +927,7 @@ node.gain.gain.linearRampToValueAtTime(0.0001, t + 0.7);
 setTimeout(() => { try { node.src.stop(); } catch (err) {} }, 900);
 },
 playNoise: function(duration, volume, startFreq, endFreq = null) {
-if (!this.ctx) return;
+if (!this.ctx || this._awakeningSongMuted) return;
 const t = this.ctx.currentTime;
 const bufferSize = Math.max(1, Math.floor(this.ctx.sampleRate * duration));
 const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
@@ -924,40 +942,147 @@ gain.gain.setValueAtTime(volume, t); gain.gain.exponentialRampToValueAtTime(0.01
 noise.connect(filter); filter.connect(gain); gain.connect(this.ctx.destination); noise.start(t);
 }
 };
-// ================= RIN UYANIŞ ŞARKISI (27 SANİYE - SENKRON) =================
-const RIN_SONG_FILE = 'rinawakeningsong.mp3';
-const RIN_SONG_DURATION = 27.0;
-const RinAwakeningAudio = {
-el: null, tried: false, failed: false, playing: false,
-init: function() {
-if (this.el || this.failed) return;
-this.tried = true;
-try {
-const a = new Audio(RIN_SONG_FILE);
+// ================= UYANIŞ ŞARKILARI (AUDIO KİLİDİ: ŞARKI ÇALARKEN BAŞKA SES YOK) =================
+// ÖNEMLİ: Pointer Lock (fare kilidi) aktifken Chrome/Edge tarayıcıda TÜM media .play()
+// çağrıları "NotAllowedError" ile reddedilir. Bu yüzden şarkıyı başlatmadan önce
+// pointer lock MUTLAKA bırakılır (exitPointerLock), sahne bitince geri alınır.
+class AwakeningSong {
+constructor(fileName, duration) {
+this.file = fileName; this.duration = duration;
+this.el = null; this.blobUrl = null; this.loading = false; this.failed = false;
+this.playing = false; this._seq = 0; this._retry = 0; this._readyFired = false;
+}
+// --- 1) MP3'ü fetch + Blob URL ile yükle (file:// ve sunucu MIME sorunlarına karşı en güvenilir yol) ---
+createEl(url) {
+const a = new Audio();
 a.preload = 'auto'; a.volume = 1.0;
-a.addEventListener('error', () => { this.failed = true; this.el = null; });
-a.addEventListener('canplaythrough', () => { this.failed = false; }, { once: true });
-this.el = a;
-const p = a.load(); if (p && p.catch) p.catch(()=>{});
-} catch (err) { this.failed = true; this.el = null; }
-},
-play: function() {
-this.init();
-if (!this.el || this.failed) return false;
+a.addEventListener('error', () => { if (this.el === a) { this.failed = true; this.el = null; this.playing = false; AudioManager.setAwakeningSongMute(false); } });
+a.addEventListener('loadeddata', () => { this._readyFired = true; }, { once: true });
+a.addEventListener('canplay', () => { this._readyFired = true; this.failed = false; }, { once: true });
+// Şarkı bittiğinde veya durduğunda diğer sesleri tekrar aç + pointer lock'u geri al
+a.addEventListener('ended', () => { if (this.el === a) { this.playing = false; AudioManager.setAwakeningSongMute(false); this.relock(); } });
+a.addEventListener('pause', () => { if (this.el === a && !a.ended && a.currentTime < this.duration - 0.3 && this.playing) { this.playing = false; AudioManager.setAwakeningSongMute(false); this.relock(); } });
+a.src = url;
+try { const lp = a.load(); if (lp && lp.catch) lp.catch(()=>{}); } catch (err) {}
+return a;
+}
+loadViaBlob() {
+if (this.loading || this.el || this.failed) return;
+this.loading = true;
+const seq = ++this._seq;
+fetch(this.file).then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.blob(); })
+.then(b => {
+if (seq !== this._seq) return;
+if (!b || !b.size) throw new Error('empty blob');
+this.loading = false;
+if (this.blobUrl) URL.revokeObjectURL(this.blobUrl);
+this.blobUrl = URL.createObjectURL(b);
+this.el = this.createEl(this.blobUrl);
+})
+.catch(() => {
+if (seq !== this._seq) return;
+this.loading = false;
+// Blob başarısızsa (ör. file:// üzerinden açıldıysa) doğrudan dosya yoluyla dene
+this.el = this.createEl(this.file);
+});
+}
+// Sahne sonlanınca fare kilidini nazikçe geri al (oyun FPS modu için)
+relock() {
+if (typeof STATE === 'undefined') return;
+setTimeout(() => {
+try { if (STATE.isPlaying && !STATE.inCutscene && !STATE.copyMenuOpen && typeof safeLock === 'function') safeLock(); } catch (err) {}
+}, 60);
+}
+// Pointer lock aktifse bırak — media play() ancak böyle çalışır
+releaseLock() {
+try { if (typeof document !== 'undefined' && document.pointerLockElement && document.exitPointerLock) document.exitPointerLock(); } catch (err) {}
+}
+init() { if (this.el || this.failed) return; this.loadViaBlob(); }
+// --- 2) Gerçek ses çıktısı: unlock + retry döngüsü (tarayıcı otomatik oynatma engeline karşı) ---
+attemptPlay() {
+const a = this.el;
+if (!a) return false;
+// Pointer lock bu satırda BIRAKILIR — play()'den ÖNCE olmalı
+this.releaseLock();
 try {
-this.el.currentTime = 0;
-const pr = this.el.play();
-if (pr && pr.then) { pr.then(() => { this.playing = true; }).catch(() => { this.playing = false; this.failed = true; }); }
-else this.playing = true;
-return true;
-} catch (err) { this.playing = false; this.failed = true; return false; }
-},
-stop: function() {
-if (this.el) { try { this.el.pause(); this.el.currentTime = 0; } catch (err) {} }
+a.currentTime = 0;
+const pr = a.play();
+if (pr && pr.then) {
+pr.then(() => { this.playing = true; this._retry = 0; })
+.catch(() => {
 this.playing = false;
-},
-time: function() { return this.el ? (this.el.currentTime || 0) : 0; }
+// Reddedildi: kilit yeni bırakıldı / audio henüz hazır değil → kısa gecikmeyle tekrar dene
+if (this._retry < 25) {
+this._retry++;
+setTimeout(() => this.attemptPlay(), 120);
+} else {
+this._retry = 0;
+AudioManager.setAwakeningSongMute(false);
+}
+});
+} else {
+this.playing = true;
+}
+return true;
+} catch (err) {
+this.playing = false;
+if (this._retry < 25) { this._retry++; setTimeout(() => this.attemptPlay(), 120); }
+else { this._retry = 0; AudioManager.setAwakeningSongMute(false); }
+return false;
+}
+}
+play() {
+this.init();
+this._retry = 0;
+if (!this.el || this.failed) return false;
+// Şarkı çalmaya başlamadan ÖNCE tüm diğer sesleri kes — sadece mp3 duyulsun
+AudioManager.setAwakeningSongMute(true);
+return this.attemptPlay();
+}
+stop() {
+this._retry = 0;
+const wasPlaying = this.playing;
+this.playing = false;
+if (this.el) { try { this.el.pause(); this.el.currentTime = 0; } catch (err) {} }
+AudioManager.setAwakeningSongMute(false);
+if (wasPlaying) this.relock();
+}
+time() { return this.el ? (this.el.currentTime || 0) : 0; }
+}
+const RIN_SONG_FILE = 'rinawkeningsong.mp3';
+const RIN_SONG_DURATION = 27.0;
+const RinAwakeningAudio = new AwakeningSong(RIN_SONG_FILE, RIN_SONG_DURATION);
+// ---- SAE UYANIŞ ŞARKISI: saeawksong.mp3 (13 sn) — bulunamazsa alternatif adlar denenir ----
+const SAE_SONG_FILES = ['saeawksong.mp3', 'saeawakeningsong.mp3', 'sae_awk_song.mp3'];
+const SAE_SONG_DURATION = 13.0;
+const SaeAwakeningAudio = new AwakeningSong(SAE_SONG_FILES[0], SAE_SONG_DURATION);
+SaeAwakeningAudio.fileCandidates = SAE_SONG_FILES;
+// loadViaBlob'u çoklu dosya adıyla dene: ilki 404 verirse sıradakini iste
+{
+const _origLoad = SaeAwakeningAudio.loadViaBlob.bind(SaeAwakeningAudio);
+SaeAwakeningAudio.loadViaBlob = function() {
+if (this.loading || this.el || this.failed) return;
+this.loading = true;
+const seq = ++this._seq;
+const cands = this.fileCandidates || [this.file];
+const tryIdx = (i) => {
+if (i >= cands.length) { // hepsi başarısız → son yol ile <audio> dene (yine de hata yönetimli)
+this.loading = false; this.el = this.createEl(cands[cands.length - 1]); return;
+}
+fetch(cands[i]).then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.blob(); })
+.then(b => {
+if (seq !== this._seq) return;
+if (!b || !b.size) throw new Error('empty blob');
+this.loading = false; this.file = cands[i];
+if (this.blobUrl) URL.revokeObjectURL(this.blobUrl);
+this.blobUrl = URL.createObjectURL(b);
+this.el = this.createEl(this.blobUrl);
+})
+.catch(() => { if (seq === this._seq) tryIdx(i + 1); });
 };
+tryIdx(0);
+};
+}
 const CONSTANTS = { GRAVITY: 30.0, PLAYER_HEIGHT: 1.7, BALL_RADIUS: 0.35, BALL_DRAG: 0.98, GOAL_WIDTH: 14, GOAL_HEIGHT: 5, DRIBBLE_OFFSET: 1.0, CURVE_FORCE: 20.0, FIELD_WIDTH: 100, FIELD_LENGTH: 150 };
 const AURA_EMIT_CHARS = ['isagi', 'rin', 'chigiri', 'nagi', 'kunigami', 'barou', 'reo'];
 const STATE = {
@@ -996,14 +1121,24 @@ lorenzo:     { cutsceneDur: 6.3, activeDur: 18.5, title: { tr: "ÖLÜMSÜZ AS Y�
 loki:        { cutsceneDur: 9.0, activeDur: 20.0, title: { tr: "TANRISAL HIZ: ZAMANIN ÖTESİ", en: "GODSPEED: BEYOND TIME" }, quote: { tr: '"Üzgünüm ama... siz daha adım atmadan ben çoktan kaleye vardım."', en: '"I\'m sorry, but... before you even take a step, I\'ve already reached the goal."' } }
 };
 // ============ RIN 27 SANİYELİK UYANIŞ ZAMAN ÇİZELGESİ (şarkı ile senkron) ============
+// Rin sahnesi zaman çizelgesi: OYUNCAK 0-2 sn içinde parçalanıp BİRLEŞİR, tam 2.0 sn'de PARÇALANIR.
+// Efektler (dikenler / rune / halkalar / tonlama duvarları / kara küre) şatterT = 2.0'a göre yeniden ayarlıdır.
+const RIN_TOY_SHATTER_T = 2.0;
 const RIN_STAGES = [
 { t: 0.00, key: 'rin_s0', tr: '"...iğrenç."', en: '"...disgusting."', color: '#00ffff', dim: 0.35, dimColor: 0x2244aa },
-{ t: 3.20, key: 'rin_s1', tr: '"Bu sahadaki herkes... beni öfkelendiriyor."', en: '"Everyone on this field... disgusts me."', color: '#4488ff', dim: 0.25, dimColor: 0x3322aa },
-{ t: 6.50, key: 'rin_s2', tr: '"Futbol... benim için sadece bir araç."', en: '"Football... is nothing but a tool for me."', color: '#8800ff', dim: 0.3, dimColor: 0x5500aa },
-{ t: 10.00, key: 'rin_s3', tr: '"Ama bu öfke... beni canlı tutuyor!"', en: '"But this rage... is what keeps me alive!"', color: '#cc0044', dim: 0.55, dimColor: 0x880033 },
-{ t: 14.00, key: 'rin_s4', tr: '"YOK ET! Hepsini ezerim!!"', en: '"DESTROY! I will crush them all!!"', color: '#ff0000', dim: 1.25, dimColor: 0xff0022 },
-{ t: 18.50, key: 'rin_s5', tr: '"En güçlü halinle gel... seni paramparça edeceğim."', en: '"Come at me at your best... I\'ll tear you apart."', color: '#ff3300', dim: 1.0, dimColor: 0xaa1122 },
-{ t: 23.00, key: 'rin_s6', tr: '"Ben... her şeyi yok eden YIKICI\'yım."', en: '"I am... the DESTROYER of everything."', color: '#ffffff', dim: 0.85, dimColor: 0xff2244 }
+{ t: 2.00, key: 'rin_s1', tr: '"Bu sahadaki herkes... beni öfkelendiriyor."', en: '"Everyone on this field... disgusts me."', color: '#cc0044', dim: 0.55, dimColor: 0x880033 },
+{ t: 4.50, key: 'rin_s2', tr: '"Ama bu öfke... beni canlı tutuyor!"', en: '"But this rage... is what keeps me alive!"', color: '#ff0000', dim: 1.25, dimColor: 0xff0022 },
+{ t: 8.00, key: 'rin_s3', tr: '"Futbol... benim için sadece bir araç."', en: '"Football... is nothing but a tool for me."', color: '#8800ff', dim: 0.9, dimColor: 0x5500aa },
+{ t: 12.00, key: 'rin_s4', tr: '"YOK ET! Hepsini ezerim!!"', en: '"DESTROY! I will crush them all!!"', color: '#ff0000', dim: 1.3, dimColor: 0xff0022 },
+{ t: 17.00, key: 'rin_s5', tr: '"En güçlü halinle gel... seni paramparça edeceğim."', en: '"Come at me at your best... I\'ll tear you apart."', color: '#ff3300', dim: 1.0, dimColor: 0xaa1122 },
+{ t: 22.00, key: 'rin_s6', tr: '"Ben... her şeyi yok eden YIKICI\'yım."', en: '"I am... the DESTROYER of everything."', color: '#ffffff', dim: 0.85, dimColor: 0xff2244 }
+];
+// ---- SAE 13 SN — Aşama zamanlaması mp3 süresine kilitli: 0-3 top kayar / 3-6 Sae koşup alır / 6-9.5 alanda 360° + halkalar / 9.5-13 duruş ----
+const SAE_STAGES = [
+{ t: 0.00,  tr: 'Veri analizi başlatılıyor...', en: 'Data analysis initiated...', color: '#88ddff', dim: 0.4, dimColor: 0x223366 },
+{ t: 3.00,  tr: '"Yeterince hızlısın... ama hesaplamam daha hızlı."', en: '"You are fast enough... but my calculation is faster."', color: '#ff69b4', dim: 0.5, dimColor: 0x44223a },
+{ t: 6.00,  tr: '"Sahayı bir denklem gibi görüyorum."', en: '"I see the field like an equation."', color: '#c71585', dim: 0.7, dimColor: 0x551133 },
+{ t: 9.50,  tr: '"Seviyemi yükseltiyorum... Bu hesaplamayı anlayabilecek bir forvet var mı?"', en: '"I\'m raising my level... Is there a striker who can comprehend this calculation?"', color: '#ffffff', dim: 0.9, dimColor: 0x883355 }
 ];
 function setDOM(id, type, val) {
 if (STATE.uiCache[type][id] !== val) {
@@ -1675,7 +1810,8 @@ if (flashEl) { flashEl.style.background = colorStr; flashEl.style.opacity = '0.8
 if (invert && invEl) { invEl.style.opacity = '1'; setTimeout(() => { if (invEl) invEl.style.opacity = '0'; }, 90); }
 },
 once(key, fn) { if (!STATE.cutsceneStageTriggered[key]) { STATE.cutsceneStageTriggered[key] = true; fn(); } },
-// ==================== RIN 27 SN UYANIŞ SAHNESİ ====================
+// ==================== RIN 27 SN UYANIŞ SAHNESİ v2 — "OYUNCAK" (yavaş anime temposu) ====================
+// Akış: oyuncak figür parçaları uzaktan süzülüp birleşir -> figür tamamlanır -> figür paramparça olur -> Rin belirir, gözü parlar, arka plan kırmızı/siyah tonlamaları
 buildRinAwakeningProps(p) {
 this.init(); this.cleanup();
 this.originPos.copy(p.transform.position); this.originPos.y = 0;
@@ -1685,38 +1821,92 @@ this.forwardDir.normalize();
 this.rightDir.copy(this.forwardDir).cross(new THREE.Vector3(0, 1, 0)).normalize();
 const O = this.originPos, F = this.forwardDir, R = this.rightDir;
 const S = {};
-S.ring = new THREE.Mesh(new THREE.RingGeometry(1.6, 2.1, 48), new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending }));
+S.parts = [];
+// --- Oyuncak figürün anatomik parçaları (kafa, gövde, kollar, bacaklar, top) ---
+const partDefs = [
+{ name: 'head', geo: new THREE.BoxGeometry(0.46, 0.5, 0.44), color: 0xe8e8f0, slot: new THREE.Vector3(0, 1.62, 0) },
+{ name: 'torso', geo: new THREE.BoxGeometry(0.62, 0.78, 0.36), color: 0x1b1b24, slot: new THREE.Vector3(0, 1.05, 0) },
+{ name: 'armL', geo: new THREE.BoxGeometry(0.2, 0.74, 0.2), color: 0xdcdce6, slot: new THREE.Vector3(-0.46, 1.08, 0) },
+{ name: 'armR', geo: new THREE.BoxGeometry(0.2, 0.74, 0.2), color: 0xdcdce6, slot: new THREE.Vector3(0.46, 1.08, 0) },
+{ name: 'legL', geo: new THREE.BoxGeometry(0.23, 0.82, 0.23), color: 0x1b1b24, slot: new THREE.Vector3(-0.19, 0.4, 0) },
+{ name: 'legR', geo: new THREE.BoxGeometry(0.23, 0.82, 0.23), color: 0x1b1b24, slot: new THREE.Vector3(0.19, 0.4, 0) },
+{ name: 'ball', geo: new THREE.IcosahedronGeometry(0.32, 1), color: 0xffffff, slot: new THREE.Vector3(0.55, 0.32, -0.75) }
+];
+partDefs.forEach((d, i) => {
+const m = new THREE.Mesh(d.geo, new THREE.MeshStandardMaterial({ color: d.color, roughness: 0.55, metalness: 0.15, emissive: 0x0a0a12, emissiveIntensity: 0.4 }));
+m.userData = {
+slotLocal: d.slot,
+homeWorld: O.clone().add(F.clone().multiplyScalar(d.slot.z)).add(R.clone().multiplyScalar(d.slot.x)).add(new THREE.Vector3(0, d.slot.y, 0)),
+startDist: 7 + i * 1.6, startH: 3.0 + Math.random() * 3.0,
+startAng: Math.random() * Math.PI * 2, arriveT: 0.55 + i * 0.185 + Math.random() * 0.09, spd: (Math.random() - 0.5) * 6,
+vel: null, rotVel: null
+};
+m.scale.setScalar(0.01);
+this.group.add(m); S.parts.push(m);
+});
+// --- Parçalanma enkazı (figür patlayınca uçan küçük küpler) ---
+S.debris = [];
+for (let i = 0; i < 42; i++) {
+const colr = i % 4 === 0 ? 0xff0033 : (i % 4 === 1 ? 0x111118 : (i % 4 === 2 ? 0xe8e8f0 : 0x00ffff));
+const dsc = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12), new THREE.MeshBasicMaterial({ color: colr, transparent: true, opacity: 0.95 }));
+dsc.visible = false; dsc.userData = { vel: new THREE.Vector3(), rot: new THREE.Vector3(), life: 0 };
+this.group.add(dsc); S.debris.push(dsc);
+}
+// --- Rin'in kendisi (sahne için kopya mesh) + parlayan gözler ---
+S.rinMesh = createBeanMesh(MASTER_DB.rin.gameColor);
+S.eyeMatL = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0 });
+S.eyeMatR = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0 });
+S.eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 10), S.eyeMatL); S.eyeL.position.set(-0.13, 1.5, -0.21);
+S.eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 10), S.eyeMatR); S.eyeR.position.set(0.13, 1.5, -0.21);
+S.rinMesh.add(S.eyeL, S.eyeR);
+S.rinMesh.visible = false;
+this.group.add(S.rinMesh);
+// --- Zemin halkaları (kırmızı/siyah ritüel çemberleri) ---
+S.ring = new THREE.Mesh(new THREE.RingGeometry(1.6, 2.1, 48), new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.DoubleSide, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending }));
 S.ring.rotation.x = -Math.PI / 2; S.ring.position.set(O.x, 0.06, O.z); this.group.add(S.ring);
-S.ring2 = new THREE.Mesh(new THREE.RingGeometry(3.5, 3.85, 48), new THREE.MeshBasicMaterial({ color: 0x8b0000, side: THREE.DoubleSide, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending }));
+S.ring2 = new THREE.Mesh(new THREE.RingGeometry(3.5, 3.85, 48), new THREE.MeshBasicMaterial({ color: 0x8b0000, side: THREE.DoubleSide, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending }));
 S.ring2.rotation.x = -Math.PI / 2; S.ring2.position.set(O.x, 0.05, O.z); this.group.add(S.ring2);
+S.runes = [];
+for (let i = 0; i < 12; i++) {
+const rn = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.09, 0.09), new THREE.MeshBasicMaterial({ color: 0xff0033, transparent: true, opacity: 0, blending: THREE.AdditiveBlending }));
+rn.position.set(O.x, 0.07, O.z); rn.userData = { ang: (i / 12) * Math.PI * 2, rad: 2.9 };
+this.group.add(rn); S.runes.push(rn);
+}
+// --- Kırmızı/siyah arka plan tonlama duvarları (animede olduğu gibi sahneyi kuşatır) ---
+S.tones = [];
+for (let i = 0; i < 10; i++) {
+const tm = new THREE.Mesh(new THREE.PlaneGeometry(16, 22), new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0x6b0012 : 0x050505, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+const a = (i / 10) * Math.PI * 2;
+tm.position.set(O.x + Math.cos(a) * 15, 8, O.z + Math.sin(a) * 15);
+tm.lookAt(O.x, 4, O.z);
+this.group.add(tm); S.tones.push(tm);
+}
+// --- Dikenler (oyuncak kırıklarıyla birlikte fışkırır) ---
 S.spikes = [];
 for (let i = 0; i < 16; i++) {
-const c = new THREE.Mesh(new THREE.ConeGeometry(0.26, 3.4, 5), new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: i % 2 === 0, transparent: true, opacity: 0.9 }));
+const c = new THREE.Mesh(new THREE.ConeGeometry(0.26, 3.4, 5), new THREE.MeshBasicMaterial({ color: 0x111111, wireframe: i % 2 === 0, transparent: true, opacity: 0.9 }));
 const ang = (i / 16) * Math.PI * 2, dist = 2.0 + (i % 3) * 0.75;
 c.userData = { ang, dist, delay: i * 0.11, baseY: -2.2 };
 c.position.set(O.x + Math.cos(ang) * dist, -2.2, O.z + Math.sin(ang) * dist);
 this.group.add(c); S.spikes.push(c);
 }
+// --- Genişleyen dalga halkaları ---
 S.ripples = [];
 for (let i = 0; i < 6; i++) {
-const r = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.035, 6, 48), new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending }));
+const r = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.035, 6, 48), new THREE.MeshBasicMaterial({ color: 0xff0033, transparent: true, opacity: 0, blending: THREE.AdditiveBlending }));
 r.rotation.x = -Math.PI / 2; r.position.set(O.x, 0.09, O.z); r.userData = { off: i / 6 };
 this.group.add(r); S.ripples.push(r);
 }
+// --- Işık sütunu (kırmızı) ---
 S.pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.8, 22, 20, 1, true), new THREE.MeshBasicMaterial({ color: 0xff0022, side: THREE.DoubleSide, transparent: true, opacity: 0.0, wireframe: true, blending: THREE.AdditiveBlending }));
 S.pillar.position.set(O.x, 11, O.z); this.group.add(S.pillar);
+// --- Siyah abyss orb (gölge küresi) ---
 S.orb = new THREE.Mesh(new THREE.SphereGeometry(1.15, 24, 24), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-S.orbAcc = new THREE.Mesh(new THREE.RingGeometry(1.3, 2.4, 40), new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending }));
+S.orbAcc = new THREE.Mesh(new THREE.RingGeometry(1.3, 2.4, 40), new THREE.MeshBasicMaterial({ color: 0xff0033, side: THREE.DoubleSide, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending }));
 S.orb.add(S.orbAcc);
 S.orb.position.copy(O).add(F.clone().multiplyScalar(-3.2)).add(new THREE.Vector3(0, 3.4, 0));
 S.orb.scale.set(0.01, 0.01, 0.01); this.group.add(S.orb);
-S.shards = [];
-for (let i = 0; i < 28; i++) {
-const s = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.06), new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xff0033 : (i % 3 === 1 ? 0x00ffff : 0xffffff), transparent: true, opacity: 0.85 }));
-s.userData = { ang: (i / 28) * Math.PI * 2, rad: 2.2 + Math.random() * 2.6, h: 0.4 + Math.random() * 3.4, spd: 0.7 + Math.random() * 1.8 };
-s.position.set(O.x, s.userData.h, O.z); s.scale.set(0.01, 0.01, 0.01);
-this.group.add(s); S.shards.push(s);
-}
+// --- Savunmacı klonlar (Rin tarafından ezilenler) ---
 S.clones = [];
 for (let i = 0; i < 3; i++) {
 const cl = createBeanMesh(0xdddddd);
@@ -1724,31 +1914,55 @@ cl.position.copy(O).add(F.clone().multiplyScalar(2.6 + i * 1.5)).add(R.clone().m
 cl.lookAt(O.x, 0, O.z); cl.scale.set(0.01, 0.01, 0.01);
 this.group.add(cl); S.clones.push(cl);
 }
+// --- Aura sarmalı (Destroyer halkaları) ---
 S.helix = [];
 for (let i = 0; i < 10; i++) {
-const rr = new THREE.Mesh(new THREE.TorusGeometry(0.85 + i * 0.05, 0.026, 6, 28), new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0x00ffff : 0xff0033, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending }));
+const rr = new THREE.Mesh(new THREE.TorusGeometry(0.85 + i * 0.05, 0.026, 6, 28), new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0xff0033 : 0x00ffff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending }));
 rr.position.copy(O).add(new THREE.Vector3(0, 1.0, 0)); this.group.add(rr); S.helix.push(rr);
 }
-this.rin = S; this.rinStage = -1;
+this.rin = S; this.rinStage = -1; this._rinShattered = false;
+},
+rinShatterToy() {
+const S = this.rin; if (!S || this._rinShattered) return;
+this._rinShattered = true;
+const toyCenter = this.originPos.clone().add(new THREE.Vector3(0, 1.0, 0));
+S.parts.forEach(pt => {
+pt.visible = false;
+const u = pt.userData;
+u.vel = new THREE.Vector3((Math.random() - 0.5) * 6, 1.5 + Math.random() * 4, (Math.random() - 0.5) * 6);
+u.rotVel = new THREE.Vector3((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10);
+for (let i = 0; i < 6; i++) {
+const db = S.debris.find(d => !d.visible);
+if (!db) break;
+db.visible = true;
+db.position.copy(u.homeWorld).add(new THREE.Vector3((Math.random() - 0.5) * 0.4, (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * 0.4));
+db.userData.vel.set((Math.random() - 0.5) * 9, 2.5 + Math.random() * 7, (Math.random() - 0.5) * 9);
+db.userData.rot.set((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 12, (Math.random() - 0.5) * 12);
+db.userData.life = 1.0;
+db.scale.setScalar(0.6 + Math.random() * 1.6);
+}
+});
+if (STATE.particleSystem) STATE.particleSystem.explode(toyCenter, 140, 0xffffff);
 },
 onRinStage(st, p) {
 const lang = currentLang || 'tr';
 const stage = RIN_STAGES[st];
 this.setBanner("ITOSHI RIN // EGO AWAKENING", AWAKENING_CONFIG.rin.title[lang], stage[lang], stage.color);
 lightDimColorHex = stage.dimColor; lightDimFactor = stage.dim; applyLightsOnly();
-if (st === 0) { this.triggerFlash('#00ffff', 260); AudioManager.playImpact(120, 0.5); }
-else if (st === 1) { this.triggerFlash('#ff0033', 120); AudioManager.playHeartbeat(); }
-else if (st === 2) { this.triggerFlash('#8800ff', 160); AudioManager.playImpact(95, 0.45); }
-else if (st === 3) { this.triggerFlash('#cc0044', 200, true); AudioManager.playImpact(80, 0.5); STATE.cameraShake = 0.6; }
-else if (st === 4) { this.triggerFlash('#ff0000', 300, true); AudioManager.playImpact(52, 0.7); STATE.cameraShake = 1.2; document.getElementById('speedlines-overlay').classList.add('speedlines-active'); if (STATE.particleSystem) STATE.particleSystem.explode(this.originPos.clone().add(new THREE.Vector3(0,1.2,0)), 150, 0xff0000); }
-else if (st === 5) { this.triggerFlash('#ff3300', 220, true); AudioManager.playImpact(70, 0.5); }
-else if (st === 6) { this.triggerFlash('#ffffff', 320, true); AudioManager.playImpact(45, 0.8); STATE.cameraShake = 1.0; }
+if (st === 0) { this.triggerFlash('#00ffff', 260); }
+else if (st === 1) { this.triggerFlash('#cc0044', 300, true); STATE.cameraShake = 1.0; if (STATE.particleSystem) STATE.particleSystem.explode(this.originPos.clone().add(new THREE.Vector3(0,1.1,0)), 150, 0xff0033); document.getElementById('speedlines-overlay').classList.add('speedlines-active'); }
+else if (st === 2) { this.triggerFlash('#ff0000', 200, true); STATE.cameraShake = 0.7; }
+else if (st === 3) { this.triggerFlash('#8800ff', 160); }
+else if (st === 4) { this.triggerFlash('#ff0000', 300, true); STATE.cameraShake = 1.2; if (STATE.particleSystem) STATE.particleSystem.explode(this.originPos.clone().add(new THREE.Vector3(0,1.2,0)), 150, 0xff0000); }
+else if (st === 5) { this.triggerFlash('#ff3300', 220, true); }
+else if (st === 6) { this.triggerFlash('#ffffff', 320, true); STATE.cameraShake = 1.0; }
 },
 updateRinAwakening(dt) {
 const p = STATE.player; if (!p || !this.rin) return;
 const total = STATE.cutsceneTotalDuration || RIN_SONG_DURATION;
 let t = total - STATE.cutsceneTimer;
-if (RinAwakeningAudio.playing) { const at = RinAwakeningAudio.time(); if (at > 0.02) t = at; }
+const at = RinAwakeningAudio.time();
+if (at > 0.02) t = Math.max(t, at); // şarkı çalarken sahne zamanı mp3 ile senkron kalsın
 t = Math.max(0, Math.min(total, t));
 const progEl = document.getElementById('cutscene-progress-bar');
 if (progEl) progEl.style.width = `${(t / total) * 100}%`;
@@ -1758,40 +1972,103 @@ if (st !== this.rinStage) { this.rinStage = st; this.onRinStage(st, p); }
 const sStart = RIN_STAGES[st].t;
 const sEnd = (st + 1 < RIN_STAGES.length) ? RIN_STAGES[st + 1].t : total;
 const sp = Math.max(0, Math.min(1, (t - sStart) / Math.max(0.001, (sEnd - sStart))));
-// Sürekli ambient animasyonlar
-S.ring.rotation.z += dt * 1.4;
-const pulse = 1 + Math.sin(t * 4.5) * 0.07;
-S.ring.scale.set(pulse, pulse, 1);
-S.ring.material.color.lerp(st >= 3 ? _cRed : _cCyan, dt * 2.2);
-S.ring.material.opacity = 0.55 + Math.sin(t * 5) * 0.25;
-S.ring2.rotation.z -= dt * 0.9;
-S.ring2.material.opacity = st >= 3 ? 0.55 + Math.sin(t * 6) * 0.2 : 0.18;
-for (let i = 0; i < S.ripples.length; i++) {
-const rp = S.ripples[i];
-const ph = (t * 0.42 + rp.userData.off) % 1;
-const sc = 1 + ph * (st >= 4 ? 11 : 7);
-rp.scale.set(sc, sc, sc);
-rp.material.opacity = (1 - ph) * (st >= 2 ? 0.6 : 0.35);
-rp.material.color.lerp(st >= 4 ? _cRed : _cCyan, dt * 2);
+// ---------- OYUNCAK PARÇALARI: süzül -> birleş -> (parçalanınca) savrul ----------
+S.parts.forEach(pt => {
+const u = pt.userData;
+if (!this._rinShattered) {
+const ap = Math.max(0, Math.min(1, t / Math.max(0.001, u.arriveT)));
+const ease = 1 - Math.pow(1 - ap, 3); // yavaş anime girişi
+const sx = u.startDist * (1 - ease);
+const sy = u.startH * (1 - ease * 0.6);
+const dirX = Math.cos(u.startAng), dirZ = Math.sin(u.startAng);
+pt.position.copy(u.homeWorld).add(R.clone().multiplyScalar(dirX * sx)).add(F.clone().multiplyScalar(dirZ * sx * 0.6)).add(new THREE.Vector3(0, sy, 0));
+pt.position.y += Math.sin(t * 1.4 + u.startAng) * 0.12 * (1 - ease);
+pt.rotation.set(u.spd * (1 - ease) * t * 0.12, u.startAng + t * u.spd * (1 - ease * 0.9), 0);
+pt.scale.setScalar(Math.max(0.01, ease * 1.0));
+} else if (u.vel) {
+u.vel.y -= 14 * dt;
+pt.position.addScaledVector(u.vel, dt);
+pt.rotation.x += u.rotVel.x * dt; pt.rotation.y += u.rotVel.y * dt;
+pt.scale.multiplyScalar(Math.max(0.01, 1 - dt * 1.5));
 }
-// Dikenler (su/kristal) yükselmesi
+});
+// ---------- ENKAZ (debris) fiziği ----------
+if (this._rinShattered) {
+S.debris.forEach(db => {
+if (!db.visible) return;
+const ud = db.userData;
+ud.vel.y -= 16 * dt;
+db.position.addScaledVector(ud.vel, dt);
+if (db.position.y < 0.06) { db.position.y = 0.06; ud.vel.y *= -0.35; ud.vel.x *= 0.8; ud.vel.z *= 0.8; }
+db.rotation.x += ud.rot.x * dt; db.rotation.y += ud.rot.y * dt;
+ud.life -= dt * 0.22;
+db.material.opacity = Math.max(0, Math.min(0.95, ud.life));
+if (ud.life <= 0) db.visible = false;
+});
+}
+// ---------- RİN MESH + PARLAYAN GÖZ (oyuncak tam 2.0 sn'de parçalanınca Rin belirir) ----------
+const shatterT = RIN_TOY_SHATTER_T; // 2.0 sn: oyuncak birleşir ve anında paramparça olur
+if (t >= shatterT && !this._rinShattered) { this.rinShatterToy(); }
+if (t >= shatterT) {
+S.rinMesh.visible = true;
+const rp = Math.min(1, (t - shatterT) / 1.6);
+S.rinMesh.position.set(O.x, O.y + (1 - rp) * 0.5, O.z);
+S.rinMesh.rotation.set(0, Math.sin(t * 0.8) * 0.05, 0);
+S.rinMesh.scale.setScalar(Math.max(0.01, rp));
+const eyeGlow = st >= 4 ? 0.85 + Math.sin(t * 6) * 0.15 : rp * 0.7;
+S.eyeMatL.opacity = eyeGlow; S.eyeMatR.opacity = eyeGlow;
+const eyeCol = st >= 4 ? 0xff0033 : 0x00ffff;
+S.eyeMatL.color.setHex(eyeCol); S.eyeMatR.color.setHex(eyeCol);
+} else { S.rinMesh.visible = false; }
+// Oyuncak aşamasında gerçek oyuncak görünsün
+p.mesh.visible = t < shatterT;
+if (t < shatterT) { p.mesh.position.set(O.x, O.y, O.z); }
+// Sürekli ambient animasyonlar (yavaş tempo)
+S.ring.rotation.z += dt * 0.5;
+const pulse = 1 + Math.sin(t * 2.2) * 0.05;
+S.ring.scale.set(pulse, pulse, 1);
+S.ring.material.opacity = t > 0.4 ? 0.35 + Math.sin(t * 2.4) * 0.15 : 0.0;
+S.ring.material.color.lerp(st >= 1 ? _cRed : _cCyan, dt * 1.2);
+S.ring2.rotation.z -= dt * 0.35;
+S.ring2.material.opacity = st >= 1 ? 0.5 + Math.sin(t * 3) * 0.2 : 0.12;
+S.runes.forEach((rn, i) => {
+const u = rn.userData;
+const a = u.ang + t * 0.25;
+rn.position.set(O.x + Math.cos(a) * u.rad, 0.07, O.z + Math.sin(a) * u.rad);
+rn.rotation.y = -a;
+rn.material.opacity = st >= 1 ? 0.5 + Math.sin(t * 4 + i) * 0.3 : 0.0;
+});
+for (let i = 0; i < S.ripples.length; i++) {
+const rp2 = S.ripples[i];
+const ph = (t * 0.3 + rp2.userData.off) % 1;
+const sc = 1 + ph * (st >= 2 ? 11 : 7);
+rp2.scale.set(sc, sc, sc);
+rp2.material.opacity = (1 - ph) * (st >= 1 ? 0.55 : 0.25);
+rp2.material.color.lerp(st >= 2 ? _cRed : _cCyan, dt * 1.5);
+}
+// Arka plan kırmızı/siyah tonlama duvarları (parçalanma anından itibaren yükselir)
+S.tones.forEach((tm, i) => {
+const wantOp = st >= 2 ? (i % 2 === 0 ? 0.34 : 0.5) : (t >= shatterT ? 0.16 : 0.0);
+tm.material.opacity += (wantOp - tm.material.opacity) * Math.min(1, dt * 1.5);
+tm.position.y = 8 + Math.sin(t * 0.6 + i) * 0.8;
+});
+// Dikenler yükselmesi — parçalanmayla (2.0 sn) birlikte fışkırır
 for (let i = 0; i < S.spikes.length; i++) {
 const sk = S.spikes[i]; const u = sk.userData;
 let rise = 0;
-if (t > 3.2) rise = Math.max(0, Math.min(1, (t - 3.2 - u.delay) * 0.75));
-if (st >= 4) rise = 1.0 + Math.sin(t * 7 + i) * 0.14;
+if (t > shatterT) rise = Math.max(0, Math.min(1, (t - shatterT - u.delay) * 1.1));
+if (st >= 2) rise = 1.0 + Math.sin(t * 7 + i) * 0.14;
 if (st >= 6) rise = Math.max(0, 1.0 - sp * 1.6) * (1 + Math.sin(t * 7 + i) * 0.1);
-sk.position.y = u.baseY + rise * (u.baseY < 0 ? -u.baseY + 0.9 : 0.9);
+sk.position.y = u.baseY + rise * (-u.baseY + 0.9);
 sk.position.x = O.x + Math.cos(u.ang + t * 0.12) * u.dist;
 sk.position.z = O.z + Math.sin(u.ang + t * 0.12) * u.dist;
 sk.rotation.y += dt * 1.5;
-_cTmp.set(t > 3.2 + u.delay ? 0xff0033 : 0x00ffff);
+_cTmp.set(t > shatterT + u.delay ? 0xff0033 : 0x00ffff);
 sk.material.color.lerp(_cTmp, dt * 3.5);
 }
-// Kalp atışı flaşları (1. aşama)
-if (st === 1) { const hb = Math.floor((t - 3.2) / 0.82); this.once('rin_hb' + hb, () => { this.triggerFlash('#ff0033', 85); AudioManager.playHeartbeat(); }); }
-// Karakter durumu
-p.mesh.visible = true;
+// Kalp atışı flaşları (1. aşama: 2.0-4.5 sn)
+if (st === 1) { const hb = Math.floor((t - RIN_STAGES[1].t) / 0.82); this.once('rin_hb' + hb, () => { this.triggerFlash('#ff0033', 85); AudioManager.playHeartbeat(); }); }
+// Karakter durumu (sahne sonrası devralma için transform güncellenir)
 let bodyPos = O.clone();
 if (st === 3) { p.mesh.position.y = O.y + sp * 0.55; p.mesh.rotation.x = -sp * 0.1; }
 else if (st === 4) { p.mesh.position.y = O.y + 0.55 + Math.abs(Math.sin(t * 3.2)) * 0.22; p.mesh.rotation.x = -0.14; p.mesh.rotation.z = Math.sin(t * 9) * 0.06; }
@@ -1824,20 +2101,6 @@ S.pillar.rotation.y += dt * 1.1;
 S.pillar.position.set(bodyPos.x, 11, bodyPos.z);
 S.pillar.scale.set(1 + (st === 4 ? sp * 0.5 : 0), 1, 1 + (st === 4 ? sp * 0.5 : 0));
 } else S.pillar.material.opacity = 0;
-// Parçalar (debris)
-if (st >= 3) {
-for (let i = 0; i < S.shards.length; i++) {
-const sh = S.shards[i]; const u = sh.userData;
-let rad = u.rad, h = u.h;
-if (st === 3) { rad *= sp; sh.scale.setScalar(Math.max(0.01, sp)); }
-else if (st === 4) { rad = u.rad * (1 + Math.sin(t * 3 + i) * 0.18); sh.scale.setScalar(1); }
-else if (st === 5) { rad = u.rad * 0.75; sh.scale.setScalar(1); }
-else { rad = Math.max(0.05, u.rad * (1 - sp * 1.05)); sh.scale.setScalar(Math.max(0.01, 1 - sp)); }
-const a = u.ang + t * u.spd;
-sh.position.set(bodyPos.x + Math.cos(a) * rad, h + Math.sin(t * 2 + i) * 0.35, bodyPos.z + Math.sin(a) * rad);
-sh.rotation.x += dt * 3; sh.rotation.y += dt * 4;
-}
-}
 // Savunmacı klonlar (yok edilenler)
 if (st >= 4 && st < 6) {
 for (let i = 0; i < S.clones.length; i++) {
@@ -1850,7 +2113,6 @@ cl.lookAt(O.x, 0, O.z);
 } else {
 this.once('rin_kill' + i, () => {
 this.triggerFlash('#ff0000', 110, true);
-AudioManager.playImpact(140 - i * 20, 0.28);
 if (STATE.particleSystem) STATE.particleSystem.explode(cl.position.clone().add(new THREE.Vector3(0, 1, 0)), 90, 0xff0000);
 });
 const kp = Math.min(1, (sp - killAt) / 0.28);
@@ -1877,31 +2139,39 @@ h.material.opacity = st === 6 ? Math.max(0, 0.6 - sp * 0.6) : 0.6;
 if (STATE.trailSystem && STATE.graphicsQuality === 'high' && st >= 3 && Math.random() < 0.6) {
 STATE.trailSystem.emit(bodyPos.clone().add(new THREE.Vector3((Math.random()-0.5)*1.4, 0.4 + Math.random()*1.6, (Math.random()-0.5)*1.4)), st >= 4 ? 0xff0033 : 0x00ffff, 1.3);
 }
-// ---------- KAMERA ----------
+// ---------- KAMERA (yavaş sinematik tempo) ----------
 if (st === 0) {
-const d = 5.8 - sp * 3.4;
 camera.up.set(0, 1, 0);
-camera.position.copy(O).add(F.clone().multiplyScalar(d)).add(new THREE.Vector3(0, 1.15 + sp * 0.4, 0));
-camera.lookAt(O.x, O.y + 1.55, O.z);
+const d = 6.6 - sp * 2.2;
+camera.position.copy(O).add(F.clone().multiplyScalar(d)).add(new THREE.Vector3(0, 1.6 + sp * 0.5, 0));
+camera.lookAt(O.x, O.y + 1.4, O.z);
 } else if (st === 1) {
-const cut = Math.floor((t - 3.2) / 0.45);
-const side = (cut % 2 === 0) ? 1 : -1;
-camera.up.set(side * (0.22 + (cut % 3) * 0.08), 0.97, 0);
-camera.position.copy(O).add(F.clone().multiplyScalar(1.45)).add(R.clone().multiplyScalar(side * 0.62)).add(new THREE.Vector3(0, 1.48, 0));
-camera.lookAt(O.x, O.y + 1.62, O.z);
+camera.up.set(0, 1, 0);
+const a = (t - RIN_STAGES[1].t) * 0.35;
+camera.position.set(O.x + Math.cos(a) * 4.6, O.y + 1.9, O.z + Math.sin(a) * 4.6);
+camera.lookAt(O.x, O.y + 1.3, O.z);
 } else if (st === 2) {
 camera.up.set(0, 1, 0);
-const a = (t - 6.5) * 0.85;
-camera.position.set(O.x + Math.cos(a) * 4.3, O.y + 1.25, O.z + Math.sin(a) * 4.3);
-camera.lookAt(O.x, O.y + 1.35, O.z);
+const d = 4.4 - sp * 1.6;
+camera.position.copy(O).add(F.clone().multiplyScalar(d)).add(R.clone().multiplyScalar(Math.sin((t - RIN_STAGES[2].t) * 0.4) * 1.2)).add(new THREE.Vector3(0, 1.35 + sp * 0.4, 0));
+camera.lookAt(O.x, O.y + 1.5, O.z);
 } else if (st === 3) {
 camera.up.set(0, 1, 0);
-camera.position.copy(O).add(F.clone().multiplyScalar(3.6 - sp * 1.2)).add(new THREE.Vector3(0, 1.6 + sp * 6.2, 0));
-camera.lookAt(O.x, O.y + 1.0, O.z);
+if (sp < 0.62) {
+const a = (t - RIN_STAGES[3].t) * 0.8;
+camera.position.set(O.x + Math.cos(a) * 3.4, O.y + 1.7, O.z + Math.sin(a) * 3.4);
+camera.lookAt(O.x, O.y + 1.3, O.z);
+} else {
+const cut = Math.floor((t - RIN_STAGES[3].t) / 0.42);
+const side = (cut % 2 === 0) ? 1 : -1;
+camera.up.set(side * 0.14, 0.99, 0);
+camera.position.copy(O).add(F.clone().multiplyScalar(1.3)).add(R.clone().multiplyScalar(side * 0.5)).add(new THREE.Vector3(0, 1.5, 0));
+camera.lookAt(O.x, O.y + 1.55, O.z);
+}
 } else if (st === 4) {
 const shake = 0.16;
 camera.up.set(Math.sin(t * 18) * 0.08, 1, 0);
-const a = (t - 14) * 2.2;
+const a = (t - RIN_STAGES[4].t) * 2.2;
 camera.position.set(O.x + Math.cos(a) * 3.1 + (Math.random()-0.5)*shake, O.y + 1.35 + (Math.random()-0.5)*shake, O.z + Math.sin(a) * 3.1 + (Math.random()-0.5)*shake);
 camera.lookAt(O.x, O.y + 1.2, O.z);
 } else if (st === 5) {
@@ -1913,7 +2183,171 @@ camera.up.set(0, 1, 0);
 const d = 2.6 - sp * 1.15;
 camera.position.copy(bodyPos).add(F.clone().multiplyScalar(d)).add(new THREE.Vector3(0, 1.02 + sp * 0.22, 0));
 camera.lookAt(bodyPos.x, O.y + 1.42, bodyPos.z);
-if (sp > 0.55) this.once('rin_final', () => { this.triggerFlash('#ffffff', 300, true); AudioManager.playImpact(38, 0.9); STATE.cameraShake = 1.4; if (STATE.particleSystem) STATE.particleSystem.explode(bodyPos.clone().add(new THREE.Vector3(0,1.2,0)), 160, 0xffffff); });
+if (sp > 0.55) this.once('rin_final', () => { this.triggerFlash('#ffffff', 300, true); STATE.cameraShake = 1.4; if (STATE.particleSystem) STATE.particleSystem.explode(bodyPos.clone().add(new THREE.Vector3(0,1.2,0)), 160, 0xffffff); });
+}
+},
+// ==================== SAE 13 SN UYANIŞ SAHNESİ — "TOP İLERİ GİDERKEN SAE HAREKET EDİP ALIR, DÜŞÜK HIZDA 360° ÇEMBERLER" ====================
+buildSaeAwakeningProps(p) {
+this.init(); this.cleanup();
+this.originPos.copy(p.transform.position); this.originPos.y = 0;
+this.forwardDir.set(0, 0, -1).applyQuaternion(STATE.savedCameraQuat); this.forwardDir.y = 0;
+if (this.forwardDir.lengthSq() < 0.001) this.forwardDir.set(0, 0, -1);
+this.forwardDir.normalize();
+this.rightDir.copy(this.forwardDir).cross(new THREE.Vector3(0, 1, 0)).normalize();
+const O = this.originPos, F = this.forwardDir, R = this.rightDir;
+const S = {};
+S.circles = [];
+for (let i = 0; i < 6; i++) {
+const ring = new THREE.Mesh(new THREE.TorusGeometry(1.6 + i * 0.85, 0.035, 8, 64), new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? 0xff69b4 : 0xc71585, transparent: true, opacity: 0.65, blending: THREE.AdditiveBlending }));
+ring.position.copy(O).add(new THREE.Vector3(0, 1.15, 0));
+ring.userData = { spd: (i % 2 === 0 ? 1 : -1) * (0.35 + i * 0.08), tilt: i * 0.22 };
+this.group.add(ring); S.circles.push(ring);
+}
+S.groundRing = new THREE.Mesh(new THREE.RingGeometry(2.2, 2.6, 64), new THREE.MeshBasicMaterial({ color: 0xff69b4, side: THREE.DoubleSide, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending }));
+S.groundRing.rotation.x = -Math.PI / 2; S.groundRing.position.set(O.x, 0.06, O.z); this.group.add(S.groundRing);
+S.scanLines = [];
+for (let i = 0; i < 10; i++) {
+const ln = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 18), new THREE.MeshBasicMaterial({ color: 0xff69b4, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending }));
+ln.position.copy(O); ln.rotation.x = -Math.PI / 2; ln.rotation.z = (i / 10) * Math.PI;
+ln.userData = { baseRot: (i / 10) * Math.PI };
+this.group.add(ln); S.scanLines.push(ln);
+}
+this.sae = S; this.saeStage = -1;
+},
+onSaeStage(st) {
+const lang = currentLang || 'tr';
+const stage = SAE_STAGES[st];
+this.setBanner("ITOSHI SAE // EGO AWAKENING", AWAKENING_CONFIG.sae.title[lang], stage[lang], stage.color);
+lightDimColorHex = stage.dimColor; lightDimFactor = stage.dim; applyLightsOnly();
+if (st === 0) { this.triggerFlash('#ff69b4', 220); }
+else if (st === 1) { this.triggerFlash('#c71585', 160); }
+else if (st === 2) { this.triggerFlash('#ff69b4', 180, true); STATE.cameraShake = 0.4; }
+else if (st === 3) { this.triggerFlash('#ffffff', 300, true); STATE.cameraShake = 0.8; document.getElementById('speedlines-overlay').classList.add('speedlines-active'); }
+},
+updateSaeAwakening(dt) {
+const p = STATE.player; if (!p || !this.sae) return;
+const total = STATE.cutsceneTotalDuration || SAE_SONG_DURATION;
+let t = total - STATE.cutsceneTimer;
+const at = SaeAwakeningAudio.time();
+if (at > 0.02) t = Math.max(t, at); // sahne zamanı mp3 ile senkron
+t = Math.max(0, Math.min(total, t));
+const progEl = document.getElementById('cutscene-progress-bar');
+if (progEl) progEl.style.width = `${(t / total) * 100}%`;
+const S = this.sae, O = this.originPos, F = this.forwardDir, R = this.rightDir;
+let st = 0; for (let i = 0; i < SAE_STAGES.length; i++) if (t >= SAE_STAGES[i].t) st = i;
+if (st !== this.saeStage) { this.saeStage = st; this.onSaeStage(st); }
+const sStart = SAE_STAGES[st].t;
+const sEnd = (st + 1 < SAE_STAGES.length) ? SAE_STAGES[st + 1].t : total;
+const sp = Math.max(0, Math.min(1, (t - sStart) / Math.max(0.001, (sEnd - sStart))));
+p.mesh.visible = true;
+const ball = STATE.ball;
+if (ball && ball.mesh) ball.mesh.visible = true;
+if (ball) STATE.ballAttached = true;
+// ---- 360° DÜŞÜK HIZDA ÇEMBERLER (sahne boyunca sürekli) ----
+S.circles.forEach((ring, i) => {
+const u = ring.userData;
+ring.rotation.y += dt * u.spd; // düşük hızda tam tur dönüşü
+ring.rotation.x = Math.PI / 2 + Math.sin(t * 0.5 + u.tilt) * 0.35;
+ring.rotation.z = Math.cos(t * 0.4 + u.tilt) * 0.25;
+const sc = 1 + Math.sin(t * 1.2 + i) * 0.06;
+ring.scale.set(sc, sc, sc);
+ring.material.opacity = st >= 2 ? 0.75 + Math.sin(t * 3 + i) * 0.2 : 0.4 + Math.sin(t * 1.5 + i) * 0.15;
+ring.position.set(p.transform.position.x, 1.15 + Math.sin(t * 0.8 + i * 0.7) * 0.25, p.transform.position.z);
+});
+S.groundRing.rotation.z += dt * 0.6;
+const grSc = 1 + Math.sin(t * 2) * 0.08;
+S.groundRing.scale.set(grSc, grSc, 1);
+S.groundRing.position.set(p.transform.position.x, 0.06, p.transform.position.z);
+S.scanLines.forEach((ln, i) => {
+ln.position.set(p.transform.position.x, 0.4 + ((t * 0.5 + i * 0.2) % 1) * 2.2, p.transform.position.z);
+ln.rotation.z = ln.userData.baseRot + t * 0.3;
+ln.material.opacity = st >= 1 ? 0.22 + Math.sin(t * 4 + i) * 0.12 : 0.08;
+});
+// ---- AŞAMA 0 (0-3sn): TOP İLERİ DOĞRU KAYAR, SAE ONA BAKAR ----
+if (st === 0) {
+p.mesh.position.set(O.x, O.y, O.z);
+p.mesh.rotation.set(0, 0, Math.sin(t * 1.5) * 0.03);
+if (ball) {
+const rollD = sp * 6.5;
+ball.transform.position.copy(O).add(F.clone().multiplyScalar(2.2 + rollD)).add(new THREE.Vector3(0, CONSTANTS.BALL_RADIUS, 0));
+ball.velocity.set(0, 0, 0); ball.curveFactor = 0;
+ball.mesh.position.copy(ball.transform.position);
+ball.mesh.rotation.z -= dt * (1.5 + sp * 4);
+}
+}
+// ---- AŞAMA 1 (3-6sn): SAE HAREKET EDER, TOPU KOVALAR VE ALIR ----
+else if (st === 1) {
+const runD = sp * 8.2;
+const sway = Math.sin(t * 6) * 0.06;
+p.transform.position.copy(O).add(F.clone().multiplyScalar(runD));
+p.transform.position.y = 0;
+p.mesh.position.set(p.transform.position.x, O.y + Math.abs(Math.sin(t * 7)) * 0.12, p.transform.position.z);
+p.mesh.rotation.set(0.12, 0, sway);
+if (ball) {
+const ballD = 8.7 - sp * 0.5;
+ball.transform.position.copy(O).add(F.clone().multiplyScalar(ballD)).add(R.clone().multiplyScalar(Math.sin(t * 2) * 0.4)).add(new THREE.Vector3(0, CONSTANTS.BALL_RADIUS + Math.abs(Math.sin(t * 5)) * 0.35 * (1 - sp), 0));
+ball.velocity.set(0, 0, 0);
+ball.mesh.position.copy(ball.transform.position);
+ball.mesh.rotation.z -= dt * 6;
+}
+if (sp > 0.9) this.once('sae_touch', () => { this.triggerFlash('#ff69b4', 90); });
+}
+// ---- AŞAMA 2 (6-9.5sn): TOPLA 360° DÜŞÜK HIZLI DÖNÜŞ (top Sae'nin etrafında döner) ----
+else if (st === 2) {
+p.transform.position.copy(O).add(F.clone().multiplyScalar(8.2));
+p.transform.position.y = 0;
+p.mesh.position.copy(p.transform.position);
+p.mesh.rotation.set(0, sp * Math.PI, 0);
+if (ball) {
+const orbitA = t * 1.9; // düşük açısal hız
+const orbitR = 1.5 - sp * 0.7;
+const ox = p.transform.position.x + Math.cos(orbitA) * orbitR;
+const oz = p.transform.position.z + Math.sin(orbitA) * orbitR;
+ball.transform.position.set(ox, CONSTANTS.BALL_RADIUS + 0.55 + Math.sin(orbitA * 2) * 0.35, oz);
+ball.velocity.set(0, 0, 0);
+ball.mesh.position.copy(ball.transform.position);
+ball.mesh.rotation.y += dt * 3;
+}
+if (STATE.trailSystem && STATE.graphicsQuality === 'high') {
+STATE.trailSystem.emit(ball.transform.position.clone(), 0xff69b4, 1.0);
+}
+}
+// ---- AŞAMA 3 (9.5-13sn): DURUŞ — ÇEMBERLER YÜKSELİR, ŞUT POZU ----
+else {
+p.transform.position.copy(O).add(F.clone().multiplyScalar(8.2));
+p.transform.position.y = 0;
+p.mesh.position.copy(p.transform.position);
+p.mesh.rotation.set(0, 0, 0);
+if (ball) {
+const settle = Math.min(1, sp * 2.2);
+ball.transform.position.copy(p.transform.position).add(F.clone().multiplyScalar(0.9 * settle + 0.2)).add(new THREE.Vector3(0, CONSTANTS.BALL_RADIUS, 0));
+ball.velocity.set(0, 0, 0);
+ball.mesh.position.copy(ball.transform.position);
+}
+S.circles.forEach((ring, i) => { ring.position.y = 1.15 + sp * (i * 0.55); });
+this.once('sae_eyes', () => { this.triggerFlash('#ffffff', 140, true); });
+}
+// ---------- KAMERA (yavaş, zarif) ----------
+if (st === 0) {
+camera.up.set(0, 1, 0);
+const d = 5.2 - sp * 1.4;
+camera.position.copy(O).add(F.clone().multiplyScalar(-d * 0.4)).add(R.clone().multiplyScalar(d)).add(new THREE.Vector3(0, 1.5, 0));
+camera.lookAt(O.x, O.y + 1.1, O.z);
+} else if (st === 1) {
+camera.up.set(0, 1, 0);
+const cp = p.transform.position.clone().add(F.clone().multiplyScalar(3.0)).add(R.clone().multiplyScalar(2.6)).add(new THREE.Vector3(0, 1.4, 0));
+camera.position.lerp(cp, Math.min(1, dt * 3));
+camera.lookAt(p.transform.position.x + F.x * 2.0, O.y + 1.0, p.transform.position.z + F.z * 2.0);
+} else if (st === 2) {
+camera.up.set(0, 1, 0);
+const a = t * 0.9; // düşük hızda 360 kamera turu
+camera.position.set(p.transform.position.x + Math.cos(a) * 4.4, O.y + 1.6 + Math.sin(t * 0.7) * 0.4, p.transform.position.z + Math.sin(a) * 4.4);
+camera.lookAt(p.transform.position.x, O.y + 1.1, p.transform.position.z);
+} else {
+camera.up.set(0, 1, 0);
+const d = 3.4 - sp * 1.6;
+camera.position.copy(p.transform.position).add(F.clone().multiplyScalar(d)).add(R.clone().multiplyScalar(0.8)).add(new THREE.Vector3(0, 1.1 + sp * 0.3, 0));
+camera.lookAt(p.transform.position.x, O.y + 1.35, p.transform.position.z);
 }
 },
 // ==================== DİĞER UYANIŞ SAHNELERİ ====================
@@ -3086,12 +3520,25 @@ if (time - STATE.fpsTime >= 1000) { document.getElementById('fps-display').inner
 if (STATE.isPlaying) {
 if (!STATE.inCutscene && STATE.metaVisionActive && STATE.metaVisionTimer > 0) { STATE.metaVisionTimer -= dt; if (STATE.metaVisionTimer <= 0) deactivateMetaVision(); }
 if (STATE.isGoal && STATE.goalResetTimer > 0) { STATE.goalResetTimer -= dt; if (STATE.goalResetTimer <= 0) resetAfterGoal(); }
-if (STATE.inCutscene && STATE.cutsceneTimer > 0) {
+if (STATE.inCutscene && STATE.cutsceneTimer > -2.0) {
 STATE.cutsceneTimer -= dt;
 if (STATE.player) {
 if (STATE.cutsceneType === 'rin_awaken') CutsceneFX.updateRinAwakening(dt);
 else if (STATE.cutsceneType === 'awakening') CutsceneFX.updateAwakening(dt);
 else CutsceneFX.updateShotCutscene(dt);
+}
+if (STATE.cutsceneTimer <= 0) {
+// a) Şarkı HİÇ başlayamadıysa (dosya yok / tarayıcı engeli): sonsuz bekleme olmaz → 1.5 sn içinde normal son.
+if (STATE.cutsceneType === 'rin_awaken' && !RinAwakeningAudio.playing && STATE.cutsceneTimer > -1.4) {
+STATE.cutsceneTimer = Math.min(STATE.cutsceneTimer, -1.5);
+}
+// b) Şarkı çalıyor ama henüz bitmediyse sahne sonlanmasın — mp3'ün sonunu bekle (güvenlik limiti: +2 sn).
+if (STATE.cutsceneType === 'rin_awaken' && RinAwakeningAudio.playing && STATE.cutsceneTimer > -2.0) {
+const songEndT = RIN_SONG_DURATION - 0.15;
+if (RinAwakeningAudio.time() < songEndT) {
+STATE.cutsceneTimer = Math.min(0.2, RIN_SONG_DURATION - RinAwakeningAudio.time());
+}
+}
 }
 if (STATE.cutsceneTimer <= 0) {
 if (STATE.cutsceneType === 'sae_v') endSaeVCutscene();
